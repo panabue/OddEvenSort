@@ -33,6 +33,7 @@ void parse_line(const char *line, Sensor *s) {
 }
 
 int main(int argc, char *argv[]) {
+    // Inicializa o MPI
     int npes, myrank;
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &npes);
@@ -96,7 +97,7 @@ int main(int argc, char *argv[]) {
     int local_count = sendcounts[myrank];
     Sensor *meus_registros = malloc(sizeof(Sensor) * local_count);
 
-    // Define o tipo MPI para Sensor (estruturado)
+    //Ensina o MPI como é a estrutura do tipo Sensor na memória.
     MPI_Datatype MPI_Sensor;
     int blocklengths[6] = {10, 1, 1, 25, 25, 1};
     MPI_Aint disps[6];
@@ -130,7 +131,7 @@ int main(int argc, char *argv[]) {
     free(disloc);
     if (myrank == 0) free(todos_registros);
 
-    // Ordenação local dos "meus_registros"
+    // Funcao complementar do qsort
     int comparar_sensor(const void *a, const void *b) {
         const Sensor *s1 = (const Sensor *)a;
         const Sensor *s2 = (const Sensor *)b;
@@ -148,12 +149,15 @@ int main(int argc, char *argv[]) {
             return 0;
     }
 
+    // Ordenação local dos "meus_registros"
     qsort(meus_registros, local_count, sizeof(Sensor), comparar_sensor);
 
+    // Funcao merge para a transposicao Odd-Even Paralela
     void merge(Sensor *local, int local_n, Sensor *recv, int recv_n, int keep_min) {
         Sensor *temp = malloc(sizeof(Sensor) * (local_n + recv_n));
         int i = 0, j = 0, k = 0;
 
+        // Mescla dois blocos de dados (local e recv) no vetor temp que contém todos os elementos ordenados
         while (i < local_n && j < recv_n) {
             if (comparar_sensor(&local[i], &recv[j]) <= 0)
                 temp[k++] = local[i++];
@@ -163,119 +167,118 @@ int main(int argc, char *argv[]) {
         while (i < local_n) temp[k++] = local[i++];
         while (j < recv_n) temp[k++] = recv[j++];
 
+        // Se keep_min for verdadeiro, esse processo deve manter os menores valores
         if (keep_min) {
             memcpy(local, temp, sizeof(Sensor) * local_n);
-        } else {
-            memcpy(local, &temp[local_n + recv_n - local_n], sizeof(Sensor) * local_n);
+        } else { // Se keep_min for falso, o processo deve manter os maiores valores
+            memcpy(local, &temp[recv_n], sizeof(Sensor) * local_n);
         }
 
         free(temp);
     }
 
-    if(myrank==0){printf("Registros iniciais ordenados:\n", myrank);}
-    for (int i = 0; i < npes; i++) {
-        if (myrank == i) {
-            //printf("Processo %d - Registros finais ordenados:\n", myrank);
-            for (int j = 0; j < local_count; j++) {
-                printf("%s %d %06d %s %s %.1f\n",
-                    meus_registros[j].sensor_id,
-                    meus_registros[j].data,
-                    meus_registros[j].hora,
-                    meus_registros[j].cidade,
-                    meus_registros[j].bairro,
-                    meus_registros[j].temperatura);
-            }
-            fflush(stdout);
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
-    }
+    // Inicicializa o temporizador
+    double inicio, fim;
+    MPI_Barrier(MPI_COMM_WORLD);
+    inicio = MPI_Wtime();
 
-    for (int phase = 0; phase < npes; phase++) {
+    // OddEvenSort
+    for (int fase = 0; fase < npes; fase++) {
         int parceiro = -1;
 
-        if (phase % 2 == 0) {
+        // Fase par: processos pares falam com ímpares à direita
+        if (fase % 2 == 0) {
             if (myrank % 2 == 0 && myrank + 1 < npes)
                 parceiro = myrank + 1;
             else if (myrank % 2 == 1)
                 parceiro = myrank - 1;
-        } else {
+        } else { // Fase ímpar: processos ímpares falam com pares à direita
             if (myrank % 2 == 1 && myrank + 1 < npes)
                 parceiro = myrank + 1;
             else if (myrank % 2 == 0 && myrank > 0)
                 parceiro = myrank - 1;
         }
 
+        // Executa a troca se tem um parceiro válido e o processo tem dados para trocar.
         if (parceiro >= 0 && local_count > 0) {
-            // Determinar tamanho do parceiro
+            // Numero de registros que o processo parceiro possui
             int parceiro_count = 0;
+            // Cada processo envia seu número de registros (local_count) e recebe o do parceiro
             MPI_Sendrecv(&local_count, 1, MPI_INT, parceiro, 1,
                         &parceiro_count, 1, MPI_INT, parceiro, 1,
                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
             if (parceiro_count > 0) {
                 Sensor *recv_buff = malloc(sizeof(Sensor) * parceiro_count);
+                // Cada processo envia seus dados locais e recebe os do parceiro no recv_buff
                 MPI_Sendrecv(meus_registros, local_count, MPI_Sensor, parceiro, 0,
                             recv_buff,     parceiro_count, MPI_Sensor, parceiro, 0,
                             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
                 int keep_min = myrank < parceiro;
+                // Mesclagem ordenada dos dados com os do parceiro
                 merge(meus_registros, local_count, recv_buff, parceiro_count, keep_min);
                 free(recv_buff);
             }
         }
 
-        MPI_Barrier(MPI_COMM_WORLD); // Sincroniza todos os processos a cada fase
+        MPI_Barrier(MPI_COMM_WORLD); // Evita que algum processo inicie uma nova troca antes que os outros estejam prontos.
+    }
+    
+    // Finaliza o temporizador
+    MPI_Barrier(MPI_COMM_WORLD);
+    fim = MPI_Wtime();
+
+    if (myrank != 0) {
+        MPI_Send(&local_count, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        MPI_Send(meus_registros, local_count, MPI_Sensor, 0, 0, MPI_COMM_WORLD);
     }
 
-    if(myrank==0){printf("Registros finais ordenados:\n", myrank);}
-    for (int i = 0; i < npes; i++) {
-        if (myrank == i) {
-            //printf("Processo %d - Registros finais ordenados:\n", myrank);
-            for (int j = 0; j < local_count; j++) {
-                printf("%s %d %06d %s %s %.1f\n",
+    if (myrank == 0) {
+
+        printf("Tempo de execucao do OddEven Paralelo: %.6f segundos\n", fim - inicio);
+
+        // Abre o arquivo para escrita
+        FILE *fp = fopen("saida_10M.txt", "w");
+        if (fp == NULL) {
+            perror("Erro ao abrir o arquivo de saída");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
+        // Escreve seus próprios registros ordenados
+        for (int j = 0; j < local_count; j++) {
+            fprintf(fp, "%s %d %06d %s %s %.1f\n",
                     meus_registros[j].sensor_id,
                     meus_registros[j].data,
                     meus_registros[j].hora,
                     meus_registros[j].cidade,
                     meus_registros[j].bairro,
                     meus_registros[j].temperatura);
-            }
-            fflush(stdout);
         }
-        MPI_Barrier(MPI_COMM_WORLD);
+
+        // Recebe os registros dos outros processos
+        for (int i = 1; i < npes; i++) {
+            int count;
+            MPI_Recv(&count, 1, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (count > 0) {
+                Sensor *temp = malloc(sizeof(Sensor) * count);
+                MPI_Recv(temp, count, MPI_Sensor, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+                for (int j = 0; j < count; j++) {
+                    fprintf(fp, "%s %d %06d %s %s %.1f\n",
+                            temp[j].sensor_id,
+                            temp[j].data,
+                            temp[j].hora,
+                            temp[j].cidade,
+                            temp[j].bairro,
+                            temp[j].temperatura);
+                }
+                free(temp);
+            }
+        }
+
+        fclose(fp);
     }
-
-    /*for(int i=0; i<npes; i++){
-        if(myrank == 1){
-            printf("\n");
-            printf("Processo %d\n", myrank);
-            printf("\n");
-            printf("Antes de ordenar:\n");
-            for(int i=0; i<local_count; i++){
-                printf("%s %d %06d %s %s %.1f\n",
-                meus_registros[i].sensor_id,
-                meus_registros[i].data,
-                meus_registros[i].hora,
-                meus_registros[i].cidade,
-                meus_registros[i].bairro,
-                meus_registros[i].temperatura);
-            }
-
-            qsort(meus_registros, local_count, sizeof(Sensor), comparar_sensor);
-
-            printf("\n");
-            printf("Depois de ordenar:\n");
-            for(int i=0; i<local_count; i++){
-                printf("%s %d %06d %s %s %.1f\n",
-                meus_registros[i].sensor_id,
-                meus_registros[i].data,
-                meus_registros[i].hora,
-                meus_registros[i].cidade,
-                meus_registros[i].bairro,
-                meus_registros[i].temperatura);
-            }
-        }
-    }*/
 
     free(meus_registros);
     MPI_Type_free(&MPI_Sensor);
