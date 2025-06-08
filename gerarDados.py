@@ -13,9 +13,11 @@ cidades_bairros_sensores = {
     "PONTA_PORA": ("GRANJA", "S09")
 }
 
-n = 10000000
+# Numero total de registros gerados
+n = 10
 
-with open("dados_10M.txt", "w") as f:
+# Coloque o nome desejado para o arquivo que sera gerado
+with open("dados_teste.txt", "w") as f:
     base_date = datetime(2024, 1, 1)
     cidades = list(cidades_bairros_sensores.keys())
 
