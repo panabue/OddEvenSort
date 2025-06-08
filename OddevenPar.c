@@ -4,7 +4,9 @@
 * Disciplina: Programação Paralela
 * Objetivo: Aplicar o algoritmo Odd-Even Sort em uma máquina com
 memória distribuída, usando múltiplos processos que se comunicam por meio da biblioteca
-MPI, para ordenar grandes volumes de dados.
+MPI, para ordenar grandes volumes de dados e compara-lo com a implementação sequencial do Odd-Even Sort, e
+com o algoritmo Quicksort, também na forma sequencial, visando avaliar ganhos de desempenho com a abordagem paralela.
+* Como executar: mpirun -np 'x' ./a.out <arquivo de entrada.txt>
 */
 
 #include <stdio.h>
@@ -32,6 +34,57 @@ void parse_line(const char *line, Sensor *s) {
            s->cidade, s->bairro, &s->temperatura);
 }
 
+// Odd-Even Sort sequencial
+void odd_even_sort_sequencial(Sensor *dados, int n) {
+    int trocou = 1;
+    while (trocou) {
+        trocou = 0;
+
+        // Fase ímpar
+        for (int i = 1; i < n - 1; i += 2) {
+            if (dados[i].data > dados[i + 1].data ||
+               (dados[i].data == dados[i + 1].data && dados[i].temperatura > dados[i + 1].temperatura)) {
+                Sensor tmp = dados[i];
+                dados[i] = dados[i + 1];
+                dados[i + 1] = tmp;
+                trocou = 1;
+            }
+        }
+
+        // Fase par
+        for (int i = 0; i < n - 1; i += 2) {
+            if (dados[i].data > dados[i + 1].data ||
+               (dados[i].data == dados[i + 1].data && dados[i].temperatura > dados[i + 1].temperatura)) {
+                Sensor tmp = dados[i];
+                dados[i] = dados[i + 1];
+                dados[i + 1] = tmp;
+                trocou = 1;
+            }
+        }
+    }
+}
+
+void quick_sort_sequencial(Sensor *dados, int q, int r) {
+    if(q<r){
+        Sensor atual = dados[q];
+        int pivo = q;
+        for(int i=q+1; i<=r; i++){
+            if(dados[i].data < atual.data || 
+              (dados[i].data == atual.data && dados[i].temperatura < atual.temperatura)){
+                pivo ++;
+                Sensor tmp = dados[pivo];
+                dados[pivo] = dados[i];
+                dados[i] = tmp;
+            }
+        }
+        Sensor tmp = dados[q];
+        dados[q] = dados[pivo];
+        dados[pivo] = tmp;
+        quick_sort_sequencial(dados, q, pivo);
+        quick_sort_sequencial(dados, pivo+1, r);
+    }
+}
+
 int main(int argc, char *argv[]) {
     // Inicializa o MPI
     int npes, myrank;
@@ -42,7 +95,7 @@ int main(int argc, char *argv[]) {
     // Aviso para executar o programa corretamente
     if (argc < 2) {
         if (myrank == 0) {
-            printf("Use: %s <arquivo_entrada>\n", argv[0]);
+            printf("Use: %s <arquivo_entrada>\n para executar!!!", argv[0]);
         }
         MPI_Finalize();
         return 1;
@@ -51,7 +104,6 @@ int main(int argc, char *argv[]) {
     Sensor *todos_registros = NULL; 
     int total_registros = 0;
 
-    // Leitura feita apenas pelo processo 0
     // Lê todas as linhas do arquivo e conta o numero de registros dos sensores (linhas)
     if (myrank == 0) {
         FILE *fp = fopen(argv[1], "r");
@@ -97,27 +149,29 @@ int main(int argc, char *argv[]) {
     int local_count = sendcounts[myrank];
     Sensor *meus_registros = malloc(sizeof(Sensor) * local_count);
 
-    //Ensina o MPI como é a estrutura do tipo Sensor na memória.
+    // Ensina o MPI como é a estrutura do tipo Sensor na memória.
     MPI_Datatype MPI_Sensor;
     int blocklengths[6] = {10, 1, 1, 25, 25, 1};
-    MPI_Aint disps[6];
+    // Vetor com os deslocamentos (em bytes) dos campos da struct em relação ao seu início.
+    MPI_Aint deslocamento[6];
     Sensor dummy;
     MPI_Aint base_addr;
 
     // Calcula os endereços dos campos dentro da struct
     MPI_Get_address(&dummy, &base_addr);
-    MPI_Get_address(&dummy.sensor_id, &disps[0]);
-    MPI_Get_address(&dummy.data, &disps[1]);
-    MPI_Get_address(&dummy.hora, &disps[2]);
-    MPI_Get_address(&dummy.cidade, &disps[3]);
-    MPI_Get_address(&dummy.bairro, &disps[4]);
-    MPI_Get_address(&dummy.temperatura, &disps[5]);
+    MPI_Get_address(&dummy.sensor_id, &deslocamento[0]);
+    MPI_Get_address(&dummy.data, &deslocamento[1]);
+    MPI_Get_address(&dummy.hora, &deslocamento[2]);
+    MPI_Get_address(&dummy.cidade, &deslocamento[3]);
+    MPI_Get_address(&dummy.bairro, &deslocamento[4]);
+    MPI_Get_address(&dummy.temperatura, &deslocamento[5]);
 
     // Transforma os endereços absolutos em deslocamentos relativos
-    for (int i = 0; i < 6; i++) disps[i] -= base_addr;
+    for (int i = 0; i < 6; i++) deslocamento[i] -= base_addr;
 
+    // Cria o sensor estruturado para o MPI
     MPI_Datatype types[6] = {MPI_CHAR, MPI_INT, MPI_INT, MPI_CHAR, MPI_CHAR, MPI_FLOAT};
-    MPI_Type_create_struct(6, blocklengths, disps, types, &MPI_Sensor);
+    MPI_Type_create_struct(6, blocklengths, deslocamento, types, &MPI_Sensor);
     MPI_Type_commit(&MPI_Sensor);
 
     // Distribui os registros igualmente
@@ -129,7 +183,6 @@ int main(int argc, char *argv[]) {
     // Libera recursos
     free(sendcounts);
     free(disloc);
-    if (myrank == 0) free(todos_registros);
 
     // Funcao complementar do qsort
     int comparar_sensor(const void *a, const void *b) {
@@ -182,7 +235,7 @@ int main(int argc, char *argv[]) {
     MPI_Barrier(MPI_COMM_WORLD);
     inicio = MPI_Wtime();
 
-    // OddEvenSort
+    // OddEvenSort Paralelizado
     for (int fase = 0; fase < npes; fase++) {
         int parceiro = -1;
 
@@ -235,11 +288,14 @@ int main(int argc, char *argv[]) {
     }
 
     if (myrank == 0) {
-
         printf("Tempo de execucao do OddEven Paralelo: %.6f segundos\n", fim - inicio);
+    }
 
+    // Gera o arquivo de saida com os dados ordenados do OddEven paralelo
+    if (myrank == 0) {
         // Abre o arquivo para escrita
-        FILE *fp = fopen("saida_10M.txt", "w");
+        // MUDE O NOME DO ARQUIVO DE SAIDA DEPENDENDO DA QUANTIDADE DE ENTRADA!
+        FILE *fp = fopen("saida_100K.txt", "w");
         if (fp == NULL) {
             perror("Erro ao abrir o arquivo de saída");
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -276,10 +332,70 @@ int main(int argc, char *argv[]) {
                 free(temp);
             }
         }
-
         fclose(fp);
     }
 
+    // OddEvenSort Sequencial (USE SÓ PARA ENTRADAS < 1.000.000)
+    /*if (myrank == 0) {
+        // Faz uma cópia de todos_registros antes de ordenar
+        Sensor *copia_para_oddeven = malloc(sizeof(Sensor) * total_registros);
+        memcpy(copia_para_oddeven, todos_registros, sizeof(Sensor) * total_registros);
+
+        double inicio = MPI_Wtime();
+        odd_even_sort_sequencial(copia_para_oddeven, total_registros);
+        double fim = MPI_Wtime();
+        
+        printf("Tempo de execucao do OddEven Sequencial: %.6f segundos\n", fim - inicio);
+
+        FILE *fp_seq = fopen("saida_odd_even_sequencial.txt", "w");
+        if (fp_seq == NULL) {
+            perror("Erro ao abrir arquivo de saída");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        
+        // Gera o arquivo de saida com os dados ordenados do OddEven sequencial
+        for (int i = 0; i < total_registros; i++) {
+            fprintf(fp_seq, "%s %d %06d %s %s %.1f\n",
+                copia_para_oddeven[i].sensor_id,
+                copia_para_oddeven[i].data,
+                copia_para_oddeven[i].hora,
+                copia_para_oddeven[i].cidade,
+                copia_para_oddeven[i].bairro,
+                copia_para_oddeven[i].temperatura);
+        }
+        fclose(fp_seq);
+        free(copia_para_oddeven);
+    }*/
+
+    //QuickSort Sequencial
+    if (myrank == 0) {
+        // Faz uma cópia de todos_registros antes de ordenar
+        Sensor *copia_para_qsort = malloc(sizeof(Sensor) * total_registros);
+        memcpy(copia_para_qsort, todos_registros, sizeof(Sensor) * total_registros);
+
+        double inicio = MPI_Wtime();
+
+        quick_sort_sequencial(copia_para_qsort, 0, total_registros - 1);
+
+        double fim = MPI_Wtime();
+        printf("Tempo de execucao do Quicksort Sequencial: %.6f segundos\n", fim - inicio);
+
+        // Gera o arquivo de saida com os dados ordenados do Quicksort sequencial
+        FILE *fp_Qseq = fopen("saida_quicksort_sequencial.txt", "w");
+        for (int i = 0; i < total_registros; i++) {
+            fprintf(fp_Qseq, "%s %d %06d %s %s %.1f\n",
+                copia_para_qsort[i].sensor_id,
+                copia_para_qsort[i].data,
+                copia_para_qsort[i].hora,
+                copia_para_qsort[i].cidade,
+                copia_para_qsort[i].bairro,
+                copia_para_qsort[i].temperatura);
+        }
+        fclose(fp_Qseq);
+        free(copia_para_qsort);
+    }
+
+    free(todos_registros);
     free(meus_registros);
     MPI_Type_free(&MPI_Sensor);
     MPI_Finalize();
